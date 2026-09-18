@@ -23,24 +23,30 @@ def fix_permissions(
     dir_gid,
 ):
     """Fix file and directory permissions and groups"""
-    os.chmod(
-        filepath,
-        file_mode,
-    )  # change permissions to group specified in config file, eg rw for all
-    os.chown(
-        filepath,
-        -1,
-        file_gid,
-    )  # change group to group specified in config file, eg, 'cesm' gid 1017
+    try:
+        os.chmod(
+            filepath,
+            file_mode,
+        )  # change permissions to group specified in config file, eg rw for all
+        os.chown(
+            filepath,
+            -1,
+            file_gid,
+        )  # change group to group specified in config file, eg, 'cesm' gid 1017
+    except PermissionError:
+        print(f"WARNING: can not change permissions or group on {filepath}")
     dirpath = ""
     for segment in filepath.split("/")[:-1]:
         dirpath = dirpath + "/" + segment
-    os.chmod(
-        dirpath,
-        dir_mode,
-    )  # This changes the tseries directory permission multiple times
-    #    if multiple files are in same directory, so efficiency could certainly be improved
-    os.chown(dirpath, -1, dir_gid)
+    try:
+        os.chmod(
+            dirpath,
+            dir_mode,
+        )  # This changes the tseries directory permission multiple times
+        #    if multiple files are in same directory, so efficiency could certainly be improved
+        os.chown(dirpath, -1, dir_gid)
+    except PermissionError:
+        print(f"WARNING: can not change permissions or group on {dirpath}")
 
 
 def create_time_series(
@@ -56,6 +62,7 @@ def create_time_series(
     start_years,
     end_years,
     height_dim,
+    slice_size,
     num_procs,
     serial,
     logger,
@@ -158,6 +165,7 @@ def create_time_series(
             start_years[case_idx],
             end_years[case_idx],
         )
+        hf_collection = hf_collection.slice_groups(slice_size_years=slice_size[case_idx], start_year=start_years[case_idx])
         if len(hf_collection) == 0:
             wmsg = f"WARNING: No {hist_str} history files fall within years"
             wmsg += f" {start_years[case_idx]}-{end_years[case_idx]} for case '{case_name}'."
@@ -268,17 +276,24 @@ def derive_cam_variables(logger, vars_to_derive=None, ts_dir=None, overwrite=Non
         if var == "RESTOM":
             # RESTOM = FSNT-FLNT
             # Have to be more precise than with PRECT because FSNTOA, FSTNC, etc are valid variables
-            if glob.glob(os.path.join(ts_dir, "*.FSNT.*")) and glob.glob(
-                os.path.join(ts_dir, "*.FLNT.*"),
-            ):
-                input_files = [
-                    sorted(glob.glob(os.path.join(ts_dir, f"*.{v}.*")))
-                    for v in ["FLNT", "FSNT"]
-                ]
-                constit_files = []
-                for elem in input_files:
-                    constit_files += elem
-            else:
+            # TODO: can GenTS provide a list of files it just created?
+            fsnt_file_glob = glob.glob(os.path.join(ts_dir, "*.FSNT.*"))
+            fsnt_files = []
+            flnt_files = []
+            for fsnt_file in fsnt_file_glob:
+                flnt_file = fsnt_file.replace(".FSNT.", ".FLNT.")
+                if os.path.isfile(flnt_file):
+                    fsnt_files.append(fsnt_file)
+                    flnt_files.append(flnt_file)
+            if not fsnt_files or not flnt_files:
+            #     input_files = [
+            #         sorted(glob.glob(os.path.join(ts_dir, f"*.{v}.*")))
+            #         for v in ["FLNT", "FSNT"]
+            #     ]
+            #     constit_files = []
+            #     for elem in input_files:
+            #         constit_files += elem
+            # else:
                 ermsg = (
                     "FSNT and FLNT were not both present; RESTOM cannot be calculated."
                 )
@@ -286,20 +301,26 @@ def derive_cam_variables(logger, vars_to_derive=None, ts_dir=None, overwrite=Non
                 raise FileNotFoundError(ermsg)
 
             # create new file name for RESTOM
-            derived_file = constit_files[0].replace("FLNT", "RESTOM")
-            if Path(derived_file).is_file():
-                if overwrite:
-                    Path(derived_file).unlink()
-                else:
-                    logger.warning(
-                        f"[{__name__}] Warning: RESTOM file was found and overwrite is False."
-                        + "Will use existing file.",
-                    )
-                    continue
+            for fsnt_file, flnt_file in zip(fsnt_files, flnt_files):
+              restom_file = fsnt_file.replace("FSNT", "RESTOM")
+              if Path(restom_file).is_file():
+                  if overwrite:
+                      Path(restom_file).unlink()
+                  else:
+                      logger.warning(
+                          f"[{__name__}] Warning: RESTOM file was found and overwrite is False."
+                          + "Will use existing file.",
+                      )
+                      continue
 
-            # append FSNT to the file containing FLNT
-            os.system(f"ncks -A -v FLNT {constit_files[0]} {constit_files[1]}")
-            # create new file with the difference of FLNT and FSNT
-            os.system(
-                f"ncap2 -s 'RESTOM=(FSNT-FLNT)' {constit_files[1]} {derived_file}",
-            )
+              # Copy FLNT file to RESTOM file
+              # TODO: this creates a RESTOM file that also contains FLNT and FSNT;
+              #       should we start by creating a temporary file and remove
+              #       those variables in the final version?
+              os.system(f"cp {flnt_file} {restom_file}")
+              # append FSNT to the RESTOM file (it now has FLNT and FSNT)
+              os.system(f"ncks -A -v FSNT {fsnt_file} {restom_file}")
+              # compute RESTOM = FSNT-FLNT in new file
+              os.system(f"ncap2 -A -s 'RESTOM=(FSNT-FLNT)' {restom_file}")
+              # modify longname attribute of RESTOM
+              os.system(f'ncatted -a long_name,RESTOM,m,c,"Residual energy flux at top of model" {restom_file}')
