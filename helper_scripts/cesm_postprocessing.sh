@@ -262,6 +262,12 @@ fi
 conda deactivate
 conda activate ${CUPID_INFRASTRUCTURE_ENV}
 if [ "${CUPID_GEN_DIAGNOSTICS}" == "TRUE" ]; then
+  # clean up output from previous runs
+  if [ -d computed_notebooks ]; then
+    cd computed_notebooks
+    rm -rf infrastructure atm lnd ocn ice glc rof *.yml
+    cd ..
+  fi
   ${CUPID_ROOT}/cupid/run_diagnostics.py ${CUPID_FLAG_STRING}
 fi
 if [ "${CUPID_GEN_HTML}" == "TRUE" ]; then
